@@ -42,21 +42,6 @@ def sanitize_name(name: str, replace_hyphens: bool = True) -> str:
         safe_name = safe_name.replace("-", "_")
     return safe_name.replace("__", "_")
 
-def get_device_key(coordinator: DataUpdateCoordinator, default: str = "") -> str:
-    """Get the sanitized device name from coordinator data."""
-    if not coordinator or not hasattr(coordinator, "data") or not coordinator.data:
-        return sanitize_name(default)
-        
-    return coordinator.data.get("public_key", default)
-
-def get_device_name(coordinator: DataUpdateCoordinator, default: str = DEFAULT_DEVICE_NAME) -> str:
-    """Get the sanitized device name from coordinator data."""
-    if not coordinator or not hasattr(coordinator, "data") or not coordinator.data:
-        return sanitize_name(default)
-        
-    raw_name = coordinator.data.get("name", default)
-    return sanitize_name(raw_name)
-
 
 def format_entity_id(domain: str, device_name: str, entity_key: str, suffix: str = "") -> str:
     """Format a consistent entity ID.
@@ -106,23 +91,3 @@ def extract_channel_idx(entity_key: str) -> int:
         _LOGGER.warning(f"Could not extract channel index from {entity_key}")
     
     return 0  # Default to channel 0 on error
-
-
-def find_coordinator_with_device_name(hass_data: Dict[str, Any]) -> tuple[Optional[DataUpdateCoordinator], str]:
-    """Find a coordinator with device name information.
-    
-    Returns:
-        Tuple of (coordinator, device_name)
-    """
-    device_name = DEFAULT_DEVICE_NAME
-    coordinator = None
-    
-    # Look through all coordinators to find one with a device name
-    if hass_data and DOMAIN in hass_data:
-        for entry_id, coord in hass_data[DOMAIN].items():
-            if hasattr(coord, "data") and "name" in coord.data:
-                coordinator = coord
-                device_name = get_device_name(coordinator)
-                break
-                
-    return coordinator, device_name
