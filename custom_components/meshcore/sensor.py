@@ -5,7 +5,9 @@ import logging
 import time
 from datetime import datetime
 from typing import Any, Dict
-
+from meshcore import EventType
+from meshcore.events import Event
+from custom_components.meshcore import MeshCoreDataUpdateCoordinator
 from homeassistant.components.sensor import (
     SensorDeviceClass,
     SensorEntity,
@@ -278,8 +280,8 @@ async def async_setup_entry(
         _LOGGER.debug("Adding sensor: %s", description.key)
         entities.append(MeshCoreSensor(coordinator, description))
     
-    # Add a contact list sensor to track all contacts
-    entities.append(MeshCoreContactListSensor(coordinator))
+    # # Add a contact list sensor to track all contacts
+    # entities.append(MeshCoreContactListSensor(coordinator))
     
     # Store the async_add_entities function for later use
     coordinator.sensor_add_entities = async_add_entities
@@ -345,24 +347,22 @@ class MeshCoreSensor(CoordinatorEntity, SensorEntity):
 
     def __init__(
         self,
-        coordinator: DataUpdateCoordinator,
+        coordinator: MeshCoreDataUpdateCoordinator,
         description: SensorEntityDescription,
     ) -> None:
         """Initialize the sensor."""
         super().__init__(coordinator)
         self.entity_description = description
+        self.coordinator = coordinator
         
         # Get raw device name for display purposes
-        raw_device_name = coordinator.data.get('name', 'Node') if coordinator.data else 'Node'
-        device_name = f"MeshCore {raw_device_name}"
-
-        public_key_short = ""
-        if coordinator.data and "public_key" in coordinator.data:
-            public_key_short = coordinator.data["public_key"][:6]
-            device_name = f"MeshCore {raw_device_name} ({public_key_short})"
+        raw_device_name = coordinator.name or "Unknown"
+        # Assume public key is always present, but handle None gracefully
+        public_key_short = coordinator.pubkey[:6] if coordinator.pubkey else ""
+        _LOGGER.info(f"Initializing sensor with name: {raw_device_name}, pubkey: {public_key_short}")
 
         # Set unique ID using consistent format - filter out any empty parts
-        parts = [part for part in [coordinator.config_entry.entry_id,  description.key, public_key_short, raw_device_name] if part]
+        parts = [part for part in [coordinator.config_entry.entry_id, description.key, public_key_short, raw_device_name] if part]
         self._attr_unique_id = "_".join(parts)
 
         self.entity_id = format_entity_id(
@@ -375,154 +375,129 @@ class MeshCoreSensor(CoordinatorEntity, SensorEntity):
         # Set name
         self._attr_name = description.name
         
-        # Set device info
-        self._attr_device_info = DeviceInfo(
-            identifiers={(DOMAIN, coordinator.config_entry.entry_id)},
-            name=device_name,
-            manufacturer=coordinator.data.get("manufacturer_name", "MeshCore") if coordinator.data else "MeshCore",
-            model="Mesh Radio",
-            sw_version=coordinator.data.get("firmware_version", coordinator.data.get("version", "Unknown")) if coordinator.data else "Unknown",
-            hw_version=coordinator.data.get("firmware_build_date", "Unknown") if coordinator.data else "Unknown",
-        )
-
-    @property
-    def native_value(self) -> Any:
-        """Return the state of the sensor."""
-        if self.coordinator.data is None:
-            return None
-
+        # For event-based sensors
+        self._remove_event_listener = None
+        
+        # Store cached values
+        self._native_value = None
+        
+    async def async_added_to_hass(self):
+        """Register event handlers when entity is added to hass."""
+        await super().async_added_to_hass()
+        meshcore = self.coordinator.api.mesh_core
         key = self.entity_description.key
         
         if key == "node_status":
-            if getattr(self.coordinator, "last_update_success", False):
-                return "online"
-            return "offline"
-            
+            def update_status(event: Event):
+                if getattr(self.coordinator, "_is_connected", False):
+                    self._native_value = "online"
+                else:
+                    self._native_value = "offline"
+            self._remove_event_listener = meshcore.dispatcher.subscribe(
+                None,
+                update_status,
+            )
+        
         elif key == "battery_voltage":
-            bat_value = self.coordinator.data.get("bat", 0)
-            if isinstance(bat_value, (int, float)) and bat_value > 0:
-                return bat_value / 1000.0  # Convert millivolts to volts
-            return None
+            def update_battery(event: Event):
+                print(f"Received status event: {event}")
+                self._native_value = event.payload.get("level") / 1000.0  # Convert from mV to V
+            self._remove_event_listener = meshcore.dispatcher.subscribe(
+                EventType.BATTERY,
+                update_battery,
+            )
             
         elif key == "battery_percentage":
-            bat_value = self.coordinator.data.get("bat", 0)
-            if isinstance(bat_value, (int, float)) and bat_value > 0:
-                voltage = bat_value / 1000.0  # Convert millivolts to volts
+            def update_battery(event: Event):
+                voltage = event.payload.get("level") / 1000.0  # Convert millivolts to volts
                 # Calculate percentage based on min/max voltage range
                 percentage = ((voltage - MIN_BATTERY_VOLTAGE) / 
                              (MAX_BATTERY_VOLTAGE - MIN_BATTERY_VOLTAGE)) * 100
                 
                 # Ensure percentage is within 0-100 range
                 percentage = max(0, min(100, percentage))
-                return round(percentage, 1)  # Round to 1 decimal place
-            return None
+                self._native_value = round(percentage, 1)  # Convert from mV to V
+            self._remove_event_listener = meshcore.dispatcher.subscribe(
+                EventType.BATTERY,
+                update_battery,
+            )
             
         elif key == "node_count":
-            contacts = self.coordinator.data.get("contacts", [])
-            return len(contacts) + 1
+            def update_count(event: Event):
+                self._native_value = len(event.payload) + 1
+            self._remove_event_listener = meshcore.dispatcher.subscribe(
+                EventType.CONTACTS,
+                update_count,
+            )
             
         elif key == "tx_power":
-            return self.coordinator.data.get("tx_power")
+            def update_tx(event: Event):
+                self._native_value = event.payload.get("max_tx_power")
+            self._remove_event_listener = meshcore.dispatcher.subscribe(
+                EventType.SELF_INFO,
+                update_tx,
+            )
             
         elif key == "latitude":
-            return self.coordinator.data.get("lat")
+            def update_lat(event: Event):
+                self._native_value = event.payload.get("adv_lat")
+            self._remove_event_listener = meshcore.dispatcher.subscribe(
+                EventType.SELF_INFO,
+                update_lat,
+            )
             
         elif key == "longitude":
-            return self.coordinator.data.get("long")
+            def update_lon(event: Event):
+                self._native_value = event.payload.get("adv_lon")
+            self._remove_event_listener = meshcore.dispatcher.subscribe(
+                EventType.SELF_INFO,
+                update_lon,
+            )
             
         elif key == "frequency":
-            freq = self.coordinator.data.get("radio_freq")
-            if freq is not None:
-                return freq / 1000
-            return None
+            def update_freq(event: Event):
+                self._native_value = event.payload.get("radio_freq")
+            self._remove_event_listener = meshcore.dispatcher.subscribe(
+                EventType.SELF_INFO,
+                update_freq,
+            )
+            
             
         elif key == "bandwidth":
-            bw = self.coordinator.data.get("radio_bw") 
-            if bw is not None:
-                # Check if already in kHz
-                if bw < 1000:
-                    return bw  # Already in kHz
-                else:
-                    return bw / 1_000  # Convert Hz to kHz
-            return None
+            def update_bw(event: Event):
+                self._native_value = event.payload.get("radio_bw")
+            self._remove_event_listener = meshcore.dispatcher.subscribe(
+                EventType.SELF_INFO,
+                update_bw,
+            )
             
         elif key == "spreading_factor":
-            return self.coordinator.data.get("radio_sf")
-        
-        return None
-
-
-class MeshCoreContactListSensor(CoordinatorEntity, SensorEntity):
-    """A sensor to track all MeshCore contacts in a single entity."""
-
-    def __init__(self, coordinator: DataUpdateCoordinator) -> None:
-        """Initialize the contact list sensor."""
-        super().__init__(coordinator)
-        
-        # Set unique ID and name
-        self._attr_unique_id = f"{coordinator.config_entry.entry_id}_contacts"
-        self._attr_name = "MeshCore Contacts"
-        
-        # Set device info to link to the main device
-        self._attr_device_info = DeviceInfo(
-            identifiers={(DOMAIN, coordinator.config_entry.entry_id)},
-        )
-        
-        # Set entity category to diagnostic
-        self._attr_entity_category = EntityCategory.DIAGNOSTIC
-        
-        # Use a custom icon
-        self._attr_icon = "mdi:account-group"
+            def update_sf(event: Event):
+                self._native_value = event.payload.get("radio_sf")
+            self._remove_event_listener = meshcore.dispatcher.subscribe(
+                EventType.SELF_INFO,
+                update_sf,
+            )
+            
+    async def async_will_remove_from_hass(self):
+        """Clean up subscriptions when entity is removed."""
+        # Unsubscribe from events if we have a listener
+        if self._remove_event_listener:
+            self._remove_event_listener.unsubscribe()
+                
+        await super().async_will_remove_from_hass()
 
     @property
-    def native_value(self) -> str:
-        """Return the current number of contacts as the state."""
-        if not self.coordinator.data:
-            return "0"
-            
-        contacts = self.coordinator.data.get("contacts", [])
-        return str(len(contacts))
-        
+    def device_info(self):
+        return DeviceInfo(**self.coordinator.device_info)
+    
     @property
-    def extra_state_attributes(self) -> Dict[str, Any]:
-        """Return details about all contacts as attributes."""
-        if not self.coordinator.data:
-            return {}
-            
-        contacts = self.coordinator.data.get("contacts", [])
-        if not contacts:
-            return {"contacts": []}
-            
-        contact_list = []
-        for contact in contacts:
-            if not isinstance(contact, dict):
-                continue
-                
-            # Extract the key info we want to display
-            contact_info = {
-                "name": contact.get("adv_name", "Unknown"),
-                "type": get_node_type_str(contact.get("type")),
-                "public_key": contact.get("public_key", "")[:16] + "...",  # Truncate for display
-                "last_seen": contact.get("last_advert", 0),
-            }
-            
-            # Add location if available
-            if "latitude" in contact and "longitude" in contact:
-                contact_info["location"] = f"{contact.get('latitude')}, {contact.get('longitude')}"
-                
-            contact_list.append(contact_info)
-            
-        # Sort by name
-        contact_list.sort(key=lambda x: x.get("name", ""))
-        
-        return {
-            "contacts": contact_list,
-            "last_updated": datetime.now().isoformat(),
-        }
-        
+    def native_value(self) -> Any:
+        return self._native_value
+
 
 class MeshCoreRepeaterSensor(CoordinatorEntity, SensorEntity):
-    """Sensor for repeater statistics."""
+    """Sensor for repeater statistics with event-based updates."""
     
     def __init__(
         self, 
@@ -549,24 +524,34 @@ class MeshCoreRepeaterSensor(CoordinatorEntity, SensorEntity):
 
         # Default device name, include public key if available
         device_name = f"MeshCore Repeater: {repeater_name}"
-        public_key_short = ""
+        self.public_key_short = ""
+        self.public_key = ""
+        
         if repeater_stats and "public_key" in repeater_stats:
-            public_key_short = repeater_stats.get("public_key_short", repeater_stats["public_key"][:6])
-            device_name = f"MeshCore Repeater: {repeater_name} ({public_key_short})"
+            self.public_key = repeater_stats["public_key"]
+            self.public_key_short = repeater_stats.get("public_key_short", self.public_key[:6])
+            device_name = f"MeshCore Repeater: {repeater_name} ({self.public_key_short})"
+        
+        # Check the contacts list if public key isn't in repeater_stats
+        if not self.public_key:
+            for contact in coordinator.data.get("contacts", []):
+                if contact.get("adv_name") == repeater_name:
+                    self.public_key = contact.get("public_key", "")
+                    self.public_key_short = self.public_key[:6] if self.public_key else ""
+                    if self.public_key_short:
+                        device_name = f"MeshCore Repeater: {repeater_name} ({self.public_key_short})"
+                    break
         
         # Set unique ID
-        self._attr_unique_id = f"{self.device_id}_{description.key}_{public_key_short}_{repeater_name}"
+        self._attr_unique_id = f"{self.device_id}_{description.key}_{self.public_key_short}_{repeater_name}"
         
         # Set entity ID
         self.entity_id = format_entity_id(
             ENTITY_DOMAIN_SENSOR,
-            public_key_short,
+            self.public_key_short,
             description.key,
             repeater_name
         )
-
-        print(f"entity ID: {self.entity_id}")
-
 
         # Set device info to create a separate device for this repeater
         device_info = {
@@ -590,21 +575,123 @@ class MeshCoreRepeaterSensor(CoordinatorEntity, SensorEntity):
                 device_info["hw_version"] = repeater_stats["firmware_build_date"]
             
         self._attr_device_info = DeviceInfo(**device_info)
+        
+        # For event-based updates
+        self._remove_event_listener = None
+        self._cached_stats = {}
+        
+    async def async_added_to_hass(self):
+        """Register event handlers when entity is added to hass."""
+        await super().async_added_to_hass()
+        
+        # Only set up listener if MeshCore instance is available
+        if not self.coordinator.api.mesh_core:
+            _LOGGER.warning(f"No MeshCore instance available for repeater stats subscription: {self.repeater_name}")
+            return
+            
+        # Only set up if we have a public key
+        if not self.public_key:
+            _LOGGER.warning(f"No public key available for repeater {self.repeater_name}, can't subscribe to events")
+            return
+            
+        # Import here to avoid import errors
+        # Use importlib to avoid confusion with local 'meshcore' module
+        import importlib
+        meshcore_events = importlib.import_module('meshcore.events')
+        EventType = meshcore_events.EventType
+        
+        try:
+            _LOGGER.info(f"Subscribing to repeater stats events for {self.repeater_name}")
+            
+            # Get the pubkey_prefix for filtering
+            pubkey_prefix = self.public_key[:12]
+            
+            # Set up subscription for stats events
+            # This assumes meshcore emits a STATUS_RESPONSE event type
+            # The actual event type may need to be adjusted based on the library
+            self._remove_event_listener = self.coordinator.api.mesh_core.subscribe(
+                EventType.STATUS_RESPONSE,  # Status response event type
+                self._handle_stats_event,
+                {"pubkey_prefix": pubkey_prefix}  # Filter by pubkey_prefix
+            )
+        except Exception as ex:
+            _LOGGER.error(f"Error setting up repeater stats subscription for {self.repeater_name}: {ex}")
+            
+    async def async_will_remove_from_hass(self):
+        """Clean up subscriptions when entity is removed."""
+        # Unsubscribe from events if we have a listener
+        if self._remove_event_listener:
+            try:
+                self._remove_event_listener()
+                self._remove_event_listener = None
+            except Exception as ex:
+                _LOGGER.error(f"Error removing repeater stats listener for {self.repeater_name}: {ex}")
+                
+        await super().async_will_remove_from_hass()
+        
+    async def _handle_stats_event(self, event):
+        """Handle repeater stats events."""
+        _LOGGER.debug(f"Received repeater stats event for {self.repeater_name}: {event}")
+        
+        if not isinstance(event, dict):
+            _LOGGER.warning(f"Invalid repeater stats event for {self.repeater_name}: {event}")
+            return
+            
+        # Cache the stats
+        self._cached_stats = event
+        
+        # Add metadata
+        self._cached_stats["repeater_name"] = self.repeater_name
+        self._cached_stats["last_updated"] = time.time()
+        
+        # Update the entity state
+        self.async_write_ha_state()
     
     @property
     def native_value(self) -> Any:
         """Return the sensor value."""
+        # First try to get from cached event data
+        if self.entity_description.key in self._cached_stats:
+            key = self.entity_description.key
+            value = self._cached_stats[key]
+            
+            # Process the value based on the sensor type
+            if key == "bat" and isinstance(value, (int, float)) and value > 0:
+                return value / 1000.0  # Convert millivolts to volts
+            
+            elif key == "battery_percentage" and "bat" in self._cached_stats:
+                bat_value = self._cached_stats["bat"]
+                if isinstance(bat_value, (int, float)) and bat_value > 0:
+                    voltage = bat_value / 1000.0  # Convert mV to V
+                    # Calculate percentage based on min/max voltage range
+                    percentage = ((voltage - MIN_BATTERY_VOLTAGE) / 
+                                (MAX_BATTERY_VOLTAGE - MIN_BATTERY_VOLTAGE)) * 100
+                    
+                    # Ensure percentage is within 0-100 range
+                    percentage = max(0, min(100, percentage))
+                    return round(percentage, 1)  # Round to 1 decimal place
+            
+            elif key == "uptime" and isinstance(value, (int, float)) and value > 0:
+                return round(value / 60, 1)  # Convert seconds to minutes
+                
+            elif key == "airtime" and isinstance(value, (int, float)) and value > 0:
+                return round(value / 60, 1)  # Convert seconds to minutes
+                
+            # Return the value directly for other sensors
+            return value
+                
+        # Fall back to coordinator data if no cached event data
         if not self.coordinator.data or "repeater_stats" not in self.coordinator.data:
             return None
             
-        # Get the repeater stats for this repeater
+        # Get the repeater stats from coordinator data
         repeater_stats = self.coordinator.data.get("repeater_stats", {}).get(self.repeater_name, {})
         if not repeater_stats:
             return None
         
         key = self.entity_description.key
         
-        # Special handling for battery voltage - convert from mV to V
+        # Special handling for specific sensor types
         if key == "bat":
             bat_value = repeater_stats.get("bat")
             if isinstance(bat_value, (int, float)) and bat_value > 0:
@@ -642,7 +729,14 @@ class MeshCoreRepeaterSensor(CoordinatorEntity, SensorEntity):
     @property
     def available(self) -> bool:
         """Return if the sensor is available."""
-        # Check if coordinator is available and we have data for this repeater
+        # First check if we have cached stats from an event
+        if self._cached_stats:
+            last_updated = self._cached_stats.get("last_updated", 0)
+            # Consider stats fresh if they were updated in the last hour
+            if time.time() - last_updated < 3600:
+                return True
+        
+        # Otherwise check coordinator data
         if not super().available or not self.coordinator.data:
             return False
             
@@ -653,6 +747,33 @@ class MeshCoreRepeaterSensor(CoordinatorEntity, SensorEntity):
     @property
     def extra_state_attributes(self) -> Dict[str, Any]:
         """Return additional state attributes."""
+        # First try to use cached stats from events
+        if self._cached_stats:
+            attributes = {
+                "last_updated": datetime.fromtimestamp(self._cached_stats.get("last_updated", 0)).isoformat()
+            }
+            
+            key = self.entity_description.key
+            
+            # Add raw values for certain sensors
+            if key == "bat" and "bat" in self._cached_stats:
+                attributes["raw_millivolts"] = self._cached_stats["bat"]
+            elif key in ["uptime", "airtime"] and key in self._cached_stats:
+                seconds = self._cached_stats[key]
+                if isinstance(seconds, (int, float)) and seconds > 0:
+                    attributes["raw_seconds"] = seconds
+                    
+                    # Add human-readable format for uptime
+                    if key == "uptime":
+                        days = seconds // 86400
+                        hours = (seconds % 86400) // 3600
+                        minutes = (seconds % 3600) // 60
+                        secs = seconds % 60
+                        attributes["human_readable"] = f"{days}d {hours}h {minutes}m {secs}s"
+            
+            return attributes
+            
+        # Fall back to coordinator data
         if not self.coordinator.data or "repeater_stats" not in self.coordinator.data:
             return {}
             

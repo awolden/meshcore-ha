@@ -11,8 +11,11 @@ from homeassistant.data_entry_flow import FlowResult
 from homeassistant.exceptions import HomeAssistantError
 import homeassistant.helpers.config_validation as cv
 from bleak import BleakScanner
+from meshcore.events import EventType
 
 from .const import (
+    CONF_NAME,
+    CONF_PUBKEY,
     DOMAIN,
     CONF_CONNECTION_TYPE,
     CONF_USB_PATH,
@@ -102,115 +105,73 @@ TCP_SCHEMA = vol.Schema(
     }
 )
 
-
-async def validate_usb_input(hass: HomeAssistant, data: Dict[str, Any]) -> Dict[str, Any]:
+async def validate_common(api: MeshCoreAPI) -> Dict[str, Any]:
     """Validate the user input allows us to connect to the USB device."""
-    try:
-        api = MeshCoreAPI(
-            connection_type=CONNECTION_TYPE_USB,
-            usb_path=data[CONF_USB_PATH],
-            baudrate=data[CONF_BAUDRATE],
-        )
-        
+    try: 
         # Try to connect with timeout
         connect_success = await asyncio.wait_for(api.connect(), timeout=CONNECTION_TIMEOUT)
         
         # Check if connection was successful
-        if not connect_success:
-            _LOGGER.error("Failed to connect to USB device - connect() returned False")
+        if not connect_success or not api._mesh_core:
+            _LOGGER.error("Failed to connect to device - connect() returned False")
             raise CannotConnect("Device connection failed")
             
         # Get node info to verify communication
-        node_info = await api.get_node_info()
+        node_info = await api._mesh_core.commands.send_appstart()
         
         # Validate we got meaningful info back
-        if not node_info or not isinstance(node_info, dict) or not node_info.get('name'):
-            _LOGGER.error("Connected to device but couldn't get node info")
-            raise CannotConnect("Device connected but no response to info request")
+        if node_info.type == EventType.ERROR:
+            _LOGGER.error("Failed to get node info - received error: %s", node_info.payload)
+            raise CannotConnect("Failed to get node info")
             
         # Disconnect when done
         await api.disconnect()
         
+        # Extract and log the device information
+        device_name = node_info.payload.get('name', 'Unknown')
+        public_key = node_info.payload.get('public_key', '')
+        
+        # Log the values we're extracting
+        _LOGGER.info(f"Validating device - Name: {device_name}, Public Key: {public_key[:10]}")
+        
         # If we get here, the connection was successful and we got valid info
-        return {"title": f"MeshCore Node {node_info.get('name', 'Unknown')}"}
+        return {"title": f"MeshCore Node {device_name}", "name": device_name, "pubkey": public_key}
     except asyncio.TimeoutError:
         raise CannotConnect("Connection timed out")
     except Exception as ex:
         _LOGGER.error("Validation error: %s", ex)
         raise CannotConnect(f"Failed to connect: {str(ex)}")
+
+async def validate_usb_input(hass: HomeAssistant, data: Dict[str, Any]) -> Dict[str, Any]:
+    """Validate the user input allows us to connect to the USB device."""
+    api = MeshCoreAPI(
+        hass=hass,
+        connection_type=CONNECTION_TYPE_USB,
+        usb_path=data[CONF_USB_PATH],
+        baudrate=data[CONF_BAUDRATE],
+    )
+    return await validate_common(api)
 
 
 async def validate_ble_input(hass: HomeAssistant, data: Dict[str, Any]) -> Dict[str, Any]:
     """Validate the user input allows us to connect to the BLE device."""
-    try:
-        api = MeshCoreAPI(
-            connection_type=CONNECTION_TYPE_BLE,
-            ble_address=data[CONF_BLE_ADDRESS],
-        )
-        
-        # Try to connect with timeout
-        connect_success = await asyncio.wait_for(api.connect(), timeout=CONNECTION_TIMEOUT)
-        
-        # Check if connection was successful
-        if not connect_success:
-            _LOGGER.error("Failed to connect to BLE device - connect() returned False")
-            raise CannotConnect("Device connection failed")
-            
-        # Get node info to verify communication
-        node_info = await api.get_node_info()
-        
-        # Validate we got meaningful info back
-        if not node_info or not isinstance(node_info, dict) or not node_info.get('name'):
-            _LOGGER.error("Connected to device but couldn't get node info")
-            raise CannotConnect("Device connected but no response to info request")
-            
-        # Disconnect when done
-        await api.disconnect()
-        
-        # If we get here, the connection was successful and we got valid info
-        return {"title": f"MeshCore Node {node_info.get('name', 'Unknown')}"}
-    except asyncio.TimeoutError:
-        raise CannotConnect("Connection timed out")
-    except Exception as ex:
-        _LOGGER.error("Validation error: %s", ex)
-        raise CannotConnect(f"Failed to connect: {str(ex)}")
+    api = MeshCoreAPI(
+        hass=hass,
+        connection_type=CONNECTION_TYPE_BLE,
+        ble_address=data[CONF_BLE_ADDRESS],
+    ) 
+    return await validate_common(api)
 
 
 async def validate_tcp_input(hass: HomeAssistant, data: Dict[str, Any]) -> Dict[str, Any]:
     """Validate the user input allows us to connect to the TCP device."""
-    try:
-        api = MeshCoreAPI(
-            connection_type=CONNECTION_TYPE_TCP,
-            tcp_host=data[CONF_TCP_HOST],
-            tcp_port=data[CONF_TCP_PORT],
-        )
-        
-        # Try to connect with timeout
-        connect_success = await asyncio.wait_for(api.connect(), timeout=CONNECTION_TIMEOUT)
-        
-        # Check if connection was successful
-        if not connect_success:
-            _LOGGER.error("Failed to connect to TCP device - connect() returned False")
-            raise CannotConnect("Device connection failed")
-            
-        # Get node info to verify communication
-        node_info = await api.get_node_info()
-        
-        # Validate we got meaningful info back
-        if not node_info or not isinstance(node_info, dict) or not node_info.get('name'):
-            _LOGGER.error("Connected to device but couldn't get node info")
-            raise CannotConnect("Device connected but no response to info request")
-            
-        # Disconnect when done
-        await api.disconnect()
-        
-        # If we get here, the connection was successful and we got valid info
-        return {"title": f"MeshCore Node {node_info.get('name', 'Unknown')}"}
-    except asyncio.TimeoutError:
-        raise CannotConnect("Connection timed out")
-    except Exception as ex:
-        _LOGGER.error("Validation error: %s", ex)
-        raise CannotConnect(f"Failed to connect: {str(ex)}")
+    api = MeshCoreAPI(
+        hass=hass,
+        connection_type=CONNECTION_TYPE_TCP,
+        tcp_host=data[CONF_TCP_HOST],
+        tcp_port=data[CONF_TCP_PORT],
+    )
+    return await validate_common(api)
 
 
 class MeshCoreConfigFlow(config_entries.ConfigFlow, domain=DOMAIN): # type: ignore
@@ -258,6 +219,8 @@ class MeshCoreConfigFlow(config_entries.ConfigFlow, domain=DOMAIN): # type: igno
                     CONF_CONNECTION_TYPE: CONNECTION_TYPE_USB,
                     CONF_USB_PATH: user_input[CONF_USB_PATH],
                     CONF_BAUDRATE: user_input[CONF_BAUDRATE],
+                    CONF_NAME: info.get("name"),
+                    CONF_PUBKEY: info.get("pubkey"),
                     CONF_MESSAGES_INTERVAL: user_input.get(CONF_MESSAGES_INTERVAL, DEFAULT_MESSAGES_INTERVAL),
                     CONF_INFO_INTERVAL: user_input.get(CONF_INFO_INTERVAL, DEFAULT_INFO_INTERVAL),
                     CONF_REPEATER_SUBSCRIPTIONS: [],  # Initialize with empty repeater subscriptions
@@ -297,6 +260,8 @@ class MeshCoreConfigFlow(config_entries.ConfigFlow, domain=DOMAIN): # type: igno
                 return self.async_create_entry(title=info["title"], data={
                     CONF_CONNECTION_TYPE: CONNECTION_TYPE_BLE,
                     CONF_BLE_ADDRESS: user_input[CONF_BLE_ADDRESS],
+                    CONF_NAME: info.get("name"),
+                    CONF_PUBKEY: info.get("pubkey"),
                     CONF_MESSAGES_INTERVAL: user_input.get(CONF_MESSAGES_INTERVAL, DEFAULT_MESSAGES_INTERVAL),
                     CONF_INFO_INTERVAL: user_input.get(CONF_INFO_INTERVAL, DEFAULT_INFO_INTERVAL),
                     CONF_REPEATER_SUBSCRIPTIONS: [],  # Initialize with empty repeater subscriptions
@@ -362,13 +327,15 @@ class MeshCoreConfigFlow(config_entries.ConfigFlow, domain=DOMAIN): # type: igno
                     CONF_CONNECTION_TYPE: CONNECTION_TYPE_TCP,
                     CONF_TCP_HOST: user_input[CONF_TCP_HOST],
                     CONF_TCP_PORT: user_input[CONF_TCP_PORT],
+                    CONF_NAME: info.get("name"),
+                    CONF_PUBKEY: info.get("pubkey"),
                     CONF_MESSAGES_INTERVAL: user_input.get(CONF_MESSAGES_INTERVAL, DEFAULT_MESSAGES_INTERVAL),
                     CONF_INFO_INTERVAL: user_input.get(CONF_INFO_INTERVAL, DEFAULT_INFO_INTERVAL),
                     CONF_REPEATER_SUBSCRIPTIONS: [],  # Initialize with empty repeater subscriptions
                 })
             except CannotConnect:
                 errors["base"] = "cannot_connect"
-            except Exception:  # pylint: disable=broad-except
+            except Exception:
                 _LOGGER.exception("Unexpected exception")
                 errors["base"] = "unknown"
 

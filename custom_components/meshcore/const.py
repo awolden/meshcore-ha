@@ -13,6 +13,8 @@ CONF_TCP_PORT: Final = "tcp_port"
 CONF_BAUDRATE: Final = "baudrate"
 DEFAULT_BAUDRATE: Final = 115200
 DEFAULT_TCP_PORT: Final = 5000
+CONF_NAME: Final = "name"
+CONF_PUBKEY: Final = "pubkey"
 
 # Connection type options
 CONNECTION_TYPE_USB: Final = "usb"

@@ -6,6 +6,8 @@ import time
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
+from meshcore.events import Event, EventType
+
 from homeassistant.components.binary_sensor import BinarySensorEntity, BinarySensorDeviceClass
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
@@ -30,11 +32,131 @@ from .utils import (
     format_entity_id,
     extract_channel_idx,
 )
+from .logbook import handle_log_message
 
 _LOGGER = logging.getLogger(__name__)
 
 # How far back to check for messages (2 weeks, matching activity window)
 MESSAGE_ACTIVITY_WINDOW = timedelta(days=14)
+
+@callback
+def handle_contacts_update(event, coordinator, async_add_entities):
+    """Process contacts update from mesh_core."""
+    if not event or not hasattr(event, "payload") or not event.payload:
+        return
+        
+    # Initialize tracking sets if needed
+    if not hasattr(coordinator, "tracked_contacts"):
+        coordinator.tracked_contacts = set()
+    if not hasattr(coordinator, "tracked_diagnostic_binary_contacts"):
+        coordinator.tracked_diagnostic_binary_contacts = set()
+    
+    contact_entities = []
+    
+    # Process each contact in the event payload
+    for key, contact in event.payload.items():
+        if not isinstance(contact, dict):
+            continue
+            
+        contact_name = contact.get("adv_name", "Unknown")
+        public_key = contact.get("public_key", "")
+        
+        # Create diagnostic binary sensor
+        if public_key and public_key not in coordinator.tracked_diagnostic_binary_contacts:
+            try:
+                coordinator.tracked_diagnostic_binary_contacts.add(public_key)
+                contact_entities.append(MeshCoreContactDiagnosticBinarySensor(
+                    coordinator, 
+                    contact_name,
+                    public_key,
+                    public_key[:12]
+                ))
+            except Exception as ex:
+                _LOGGER.error(f"Error setting up contact diagnostic binary sensor: {ex}")
+    
+    # Add new entities
+    if contact_entities:
+        _LOGGER.info(f"Adding {len(contact_entities)} diagnostic entities from CONTACTS event")
+        async_add_entities(contact_entities)
+
+@callback
+def handle_contact_message(event, coordinator, async_add_entities):
+    print(f"Received contact message event: {event}")
+    """Create message entity on first message received from a contact."""
+    if not event or not hasattr(event, "payload") or not event.payload:
+        return
+        
+    # Skip if we don't have meshcore
+    if not coordinator.api.mesh_core:
+        return
+    
+    # Extract pubkey_prefix from the event payload
+    payload = event.payload
+    pubkey_prefix = payload.get("pubkey_prefix")
+    
+    # Skip if no pubkey_prefix or already tracking this contact
+    if not pubkey_prefix or pubkey_prefix in coordinator.tracked_contacts:
+        return
+    
+    # Get contact information from MeshCore
+    contact = coordinator.api.mesh_core.get_contact_by_key_prefix(pubkey_prefix)
+    if not contact:
+        return
+        
+    contact_name = contact.get("adv_name", "Unknown")
+    
+    # Create message entity for this contact
+    message_entity = MeshCoreMessageEntity(
+        coordinator, pubkey_prefix, f"{contact_name} Messages", 
+        public_key=pubkey_prefix
+    )
+    
+    # Track this contact
+    coordinator.tracked_contacts.add(pubkey_prefix)
+    
+    # Add the entity
+    _LOGGER.info(f"Adding message entity for {contact_name} after receiving message")
+    async_add_entities([message_entity])
+
+@callback
+def handle_channel_message(event, coordinator, async_add_entities):
+    print(f"Received channel message event: {event}")
+    """Create channel message entity on first message in a channel."""
+    if not event or not hasattr(event, "payload") or not event.payload:
+        return
+        
+    # Skip if we don't have meshcore
+    if not coordinator.api.mesh_core:
+        return
+    
+    # Extract channel_idx from the event payload
+    payload = event.payload
+    channel_idx = payload.get("channel_idx")
+    
+    # Skip if no channel_idx or if channels are already added
+    if channel_idx is None or hasattr(coordinator, "channels_added") and coordinator.channels_added:
+        return
+    
+    # Initialize channels list if needed
+    if not hasattr(coordinator, "tracked_channels"):
+        coordinator.tracked_channels = set()
+    
+    # Skip if this channel is already tracked
+    if channel_idx in coordinator.tracked_channels:
+        return
+        
+    # Create channel entity
+    safe_channel = f"{CHANNEL_PREFIX}{channel_idx}"
+    channel_entity = MeshCoreMessageEntity(
+        coordinator, safe_channel, f"Channel {channel_idx} Messages"
+    )
+    
+    # Track this channel
+    coordinator.tracked_channels.add(channel_idx)
+    
+    # Add the entity
+    _LOGGER.info(f"Adding message entity for channel {channel_idx} after receiving message")
+    async_add_entities([channel_entity])
 
 async def async_setup_entry(
     hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
@@ -42,171 +164,69 @@ async def async_setup_entry(
     """Set up MeshCore message entities from config entry."""
     coordinator = hass.data[DOMAIN][entry.entry_id]
     
-    # Store the async_add_entities function for later use
-    coordinator.binary_sensor_add_entities = async_add_entities
-    
-    # Track contacts we've already created entities for
+    # Initialize tracking sets
     coordinator.tracked_contacts = set()
+    coordinator.tracked_channels = set()
+    coordinator.tracked_diagnostic_binary_contacts = set()
     
-    # Track diagnostic contacts we've already created binary sensors for
-    if not hasattr(coordinator, "tracked_diagnostic_binary_contacts"):
-        coordinator.tracked_diagnostic_binary_contacts = set()
-    
-    # Function to create and add entities for all contacts
-    @callback
-    def create_contact_entities(contacts=None):
-        _LOGGER.info(f"Creating contact message entities with {len(contacts) if contacts else 0} contacts")
-        entities = []
-        
-        # Add channel entities (only first time)
-        if not hasattr(coordinator, "channels_added") or not coordinator.channels_added:
-            # Add channel message entities for channels 0-3
-            for channel_idx in range(4):
-                safe_channel = f"{CHANNEL_PREFIX}{channel_idx}"
-                entities.append(MeshCoreMessageEntity(
-                    coordinator, safe_channel, f"Channel {channel_idx} Messages"
-                ))
-            coordinator.channels_added = True
-        
-        # Only proceed if we have contacts
-        if not contacts:
-            _LOGGER.warning("No contacts provided for entity creation")
-            return
-        for contact in contacts:
-            if not isinstance(contact, dict):
-                continue
-
-            if contact.get("type") == NodeType.REPEATER:
-                continue
-                
-            contact_name = contact.get("adv_name", "")
-            public_key = contact.get("public_key", "")
-            public_key_prefix = public_key[:12] if public_key else ""
-            # Skip if we already have an entity for this contact
-            contact_id = public_key or contact_name
-            if contact_id in coordinator.tracked_contacts:
-                continue
-                
-            if contact_name:
-                _LOGGER.info(f"Creating message entity for contact: {contact_name}")
-                new_entity = MeshCoreMessageEntity(
-                    coordinator, public_key_prefix, f"{contact_name} Messages", 
-                    public_key=public_key
-                )
-                entities.append(new_entity)
-                coordinator.tracked_contacts.add(contact_id)
-        
-        # Add entities if any were created
-        if entities:
-            _LOGGER.info(f"Adding {len(entities)} new contact message entities")
-            async_add_entities(entities)
-    
-    # Function to create and add contact diagnostic binary sensors
-    @callback
-    def create_contact_diagnostic_binary_sensors(contacts=None):
-        _LOGGER.info(f"Creating contact diagnostic binary sensors with {len(contacts) if contacts else 0} contacts")
-        new_entities = []
-        
-        # Only proceed if we have contacts
-        if not contacts:
-            _LOGGER.warning("No contacts provided for diagnostic binary sensor creation")
-            return
-            
-        for contact in contacts:
-            if not isinstance(contact, dict):
-                continue
-                
-            try:
-                name = contact.get("adv_name", "Unknown")
-                public_key = contact.get("public_key", "")
-                
-                if not public_key:
-                    continue
-                    
-                # Skip if we already have a binary sensor for this contact
-                if public_key in coordinator.tracked_diagnostic_binary_contacts:
-                    continue
-                    
-                # Track this contact
-                coordinator.tracked_diagnostic_binary_contacts.add(public_key)
-                
-                _LOGGER.info(f"Creating diagnostic binary sensor for contact: {name}")
-                
-                # Create diagnostic binary sensor for this contact
-                sensor = MeshCoreContactDiagnosticBinarySensor(
-                    coordinator, 
-                    name,
-                    public_key,
-                    public_key[:12]
-                )
-                
-                new_entities.append(sensor)
-                
-            except Exception as ex:
-                _LOGGER.error("Error setting up contact diagnostic binary sensor: %s", ex)
-        
-        # Add entities if any were created
-        if new_entities:
-            _LOGGER.info(f"Adding {len(new_entities)} new contact diagnostic binary sensors")
-            async_add_entities(new_entities)
-    
-    # Function to create and add repeater binary sensors
-    @callback
-    def create_repeater_binary_sensors(repeater_subscriptions=None):
-        _LOGGER.info(f"Creating repeater binary sensors with {len(repeater_subscriptions) if repeater_subscriptions else 0} repeaters")
-        new_entities = []
-        
-        # Only proceed if we have repeaters
-        if not repeater_subscriptions:
-            _LOGGER.warning("No repeaters provided for binary sensor creation")
-            return
-            
-        for repeater in repeater_subscriptions:
-            if not repeater.get("enabled", True):
-                continue
-                
-            repeater_name = repeater.get("name")
-            if not repeater_name:
-                continue
-                
-            _LOGGER.info(f"Creating binary sensor for repeater: {repeater_name}")
-            
-            # Create repeater status binary sensor
-            try:
-                sensor = MeshCoreRepeaterBinarySensor(
-                    coordinator,
-                    repeater_name,
-                    "status"
-                )
-                new_entities.append(sensor)
-            except Exception as ex:
-                _LOGGER.error(f"Error creating repeater binary sensor: {ex}")
-        
-        # Add entities if any were created
-        if new_entities:
-            _LOGGER.info(f"Adding {len(new_entities)} new repeater binary sensors")
-            async_add_entities(new_entities)
-    
-    # Run initially with the current contacts
-    initial_contacts = coordinator.data.get("contacts", [])
-    create_contact_entities(initial_contacts)
-    
-    # Create contact diagnostic binary sensors
-    create_contact_diagnostic_binary_sensors(initial_contacts)
-    
-    # Create repeater binary sensors if any repeaters are configured
+    # Create repeater entities if configured
+    repeater_entities = []
     repeater_subscriptions = entry.data.get("repeater_subscriptions", [])
-    if repeater_subscriptions:
-        create_repeater_binary_sensors(repeater_subscriptions)
+    for repeater in repeater_subscriptions:
+        if not repeater.get("enabled", True):
+            continue
+            
+        repeater_name = repeater.get("name")
+        if not repeater_name:
+            continue
+            
+        repeater_entities.append(MeshCoreRepeaterBinarySensor(
+            coordinator, repeater_name, "status"
+        ))
     
-    # Store the functions on the coordinator for future calls
-    coordinator.create_binary_sensor_entities = create_contact_entities
-    coordinator.create_contact_diagnostic_binary_sensors = create_contact_diagnostic_binary_sensors
-    coordinator.create_repeater_binary_sensors = create_repeater_binary_sensors
-
+    # Add repeater entities
+    if repeater_entities:
+        async_add_entities(repeater_entities)
+    
+    # Set up event listeners
+    listeners = []
+    
+    # Create event handlers
+    @callback
+    def contacts_event_handler(event):
+        handle_contacts_update(event, coordinator, async_add_entities)
+    
+    @callback
+    def contact_message_handler(event):
+        handle_contact_message(event, coordinator, async_add_entities)
+        
+    @callback
+    def channel_message_handler(event):
+        handle_channel_message(event, coordinator, async_add_entities)
+    
+    # Subscribe to events directly from mesh_core
+    if coordinator.api.mesh_core:
+        # Contact discovery for diagnostic entities
+        listeners.append(coordinator.api.mesh_core.subscribe(
+            EventType.CONTACTS,
+            contacts_event_handler
+        ))
+        
+        # Message events to create entities on first message
+        listeners.append(coordinator.api.mesh_core.subscribe(
+            EventType.CONTACT_MSG_RECV,
+            contact_message_handler
+        ))
+        
+        # Channel message events
+        listeners.append(coordinator.api.mesh_core.subscribe(
+            EventType.CHANNEL_MSG_RECV,
+            channel_message_handler
+        ))
+    
 
 class MeshCoreMessageEntity(CoordinatorEntity, BinarySensorEntity):
-    """Binary sensor entity that tracks mesh network messages."""
+    """Binary sensor entity that tracks mesh network messages using event subscription."""
 
     _attr_has_entity_name = True
     _attr_should_poll = False
@@ -257,49 +277,117 @@ class MeshCoreMessageEntity(CoordinatorEntity, BinarySensorEntity):
         else:
             self._attr_icon = "mdi:message-text-outline"
         
-        # Set device info to link to the main device
-        self._attr_device_info = DeviceInfo(
-            identifiers={(DOMAIN, coordinator.config_entry.entry_id)},
-        )
         
+        # Initialize tracking variables
+        self._last_message_time = 0
+        self._remove_channel_listener = None
+        self._remove_contact_listener = None
         
-    def _check_message_activity(self) -> bool:
-        """Check for recent message activity using coordinator timestamp data."""
-        # If message_timestamps doesn't exist, initialize it
+    async def async_added_to_hass(self):
+        """Register event handlers when entity is added to hass."""
+        await super().async_added_to_hass()
+        
+        # Only set up listeners if a MeshCore instance is available
+        if not self.coordinator.api.mesh_core:
+            _LOGGER.warning("No MeshCore instance available for subscriptions")
+            return
+            
+        mesh_core = self.coordinator.api.mesh_core
+        
+        # Set up subscription based on entity type
+        # Use importlib to avoid confusion with local 'meshcore' module
+        import importlib
+        meshcore_events = importlib.import_module('meshcore.events')
+        EventType = meshcore_events.EventType
+        
+        if self.entity_key.startswith(CHANNEL_PREFIX):
+            # For channel messages, subscribe with channel filter
+            try:
+                channel_idx = extract_channel_idx(self.entity_key)
+                _LOGGER.info(f"Subscribing to channel {channel_idx} messages")
+                
+                self._remove_channel_listener = mesh_core.subscribe(
+                    EventType.CHANNEL_MSG_RECV,
+                    self._handle_message_event,
+                    {"channel_idx": channel_idx}  # Filter by channel
+                )
+            except Exception as ex:
+                _LOGGER.error(f"Error setting up channel message subscription: {ex}")
+                
+        elif self.public_key:
+            # For contact messages, subscribe with pubkey_prefix filter
+            try:
+                pubkey_prefix = self.public_key[:12]
+                _LOGGER.info(f"Subscribing to contact {pubkey_prefix} messages")
+                
+                self._remove_contact_listener = mesh_core.subscribe(
+                    EventType.CONTACT_MSG_RECV,
+                    self._handle_message_event,
+                    {"pubkey_prefix": pubkey_prefix}  # Filter by pubkey_prefix
+                )
+            except Exception as ex:
+                _LOGGER.error(f"Error setting up contact message subscription: {ex}")
+        
+    async def async_will_remove_from_hass(self):
+        """Clean up subscriptions when entity is removed."""
+        # Unsubscribe from events
+        if self._remove_channel_listener:
+            try:
+                self._remove_channel_listener()
+                self._remove_channel_listener = None
+            except Exception as ex:
+                _LOGGER.error(f"Error removing channel listener: {ex}")
+                
+        if self._remove_contact_listener:
+            try:
+                self._remove_contact_listener()
+                self._remove_contact_listener = None
+            except Exception as ex:
+                _LOGGER.error(f"Error removing contact listener: {ex}")
+                
+        await super().async_will_remove_from_hass()
+    
+    async def _handle_message_event(self, event):
+        """Handle message events."""
+        if not event or not hasattr(event, "payload"):
+            return
+            
+        _LOGGER.debug(f"Received message event: {event}")
+        
+        # Update timestamp
+        self._last_message_time = time.time()
+        
+        # For backward compatibility, also update coordinator's timestamps
         if not hasattr(self.coordinator, "message_timestamps"):
             self.coordinator.message_timestamps = {}
-            return False
-        
-        # Calculate cutoff time for activity window
-        cutoff_time = time.time() - MESSAGE_ACTIVITY_WINDOW.total_seconds()
-        
-        # Determine key to check
+            
+        # Determine key to use in coordinator timestamps
         key = None
         if self.entity_key.startswith(CHANNEL_PREFIX):
             key = extract_channel_idx(self.entity_key)
         elif self.public_key:
             key = self.public_key
+            
+        if key is not None:
+            self.coordinator.message_timestamps[key] = self._last_message_time
         
-        # Check if we have recent messages
-        if key is not None and key in self.coordinator.message_timestamps:
-            return self.coordinator.message_timestamps[key] > cutoff_time
+        # Log message to logbook
+        payload = event.payload
+        if isinstance(payload, dict):
+            handle_log_message(self.hass, payload)
         
-        return False
+        # Update entity state
+        self.async_write_ha_state()
+                
     
+    @property
+    def device_info(self):
+        return DeviceInfo(**self.coordinator.device_info)
+        
     @property
     def is_on(self) -> bool:
         """Return true if there are recent messages in the activity window."""
-        # Use our helper method to check message activity
-        # This ensures we always get the latest state
-        return self._check_message_activity()
-    
-    async def async_update(self) -> None:
-        """Update message status."""
-        await super().async_update()
-        
-        # We no longer need to do anything here since is_on
-        # directly checks for message activity when called
-
+        return True
     
     @property
     def extra_state_attributes(self) -> Dict[str, Any]:
@@ -321,15 +409,8 @@ class MeshCoreMessageEntity(CoordinatorEntity, BinarySensorEntity):
             attributes["public_key"] = self.public_key
             
         # Add timestamp of last message if available
-        key = None
-        if self.entity_key.startswith(CHANNEL_PREFIX):
-            key = extract_channel_idx(self.entity_key)
-        elif self.public_key:
-            key = self.public_key
-            
-        if key is not None and hasattr(self.coordinator, "message_timestamps") and key in self.coordinator.message_timestamps:
-            timestamp = self.coordinator.message_timestamps[key]
-            attributes["last_message"] = datetime.fromtimestamp(timestamp).isoformat()
+        if self._last_message_time > 0:
+            attributes["last_message"] = datetime.fromtimestamp(self._last_message_time).isoformat()
             
         return attributes
 
@@ -349,6 +430,9 @@ class MeshCoreContactDiagnosticBinarySensor(CoordinatorEntity, BinarySensorEntit
         
         self.contact_name = contact_name
         self.public_key = public_key
+        self.pubkey_prefix = public_key[:12] if public_key else ""
+        self._contact_data = {}
+        self._remove_contacts_listener = None
         
         # Set unique ID
         self._attr_unique_id = contact_id
@@ -356,17 +440,12 @@ class MeshCoreContactDiagnosticBinarySensor(CoordinatorEntity, BinarySensorEntit
         self.entity_id = format_entity_id(
             ENTITY_DOMAIN_BINARY_SENSOR,
             contact_name,
-            public_key[:12],
+            self.pubkey_prefix,
             CONTACT_SUFFIX
         )
 
-        # Initial name (will be updated in _update_attributes)
+        # Initial name
         self._attr_name = contact_name
-        
-        # Set device info to link to the main device
-        self._attr_device_info = DeviceInfo(
-            identifiers={(DOMAIN, coordinator.config_entry.entry_id)},
-        )
         
         # Set entity category to diagnostic
         self._attr_entity_category = EntityCategory.DIAGNOSTIC
@@ -374,9 +453,73 @@ class MeshCoreContactDiagnosticBinarySensor(CoordinatorEntity, BinarySensorEntit
         # Set device class to connectivity
         self._attr_device_class = BinarySensorDeviceClass.CONNECTIVITY
         
-        # Icon will be set dynamically in the _update_attributes method
-        self._update_attributes()
+        # Icon will be set dynamically
+        self._attr_icon = "mdi:radio-tower"
+        
+        # Get initial data from coordinator
+        initial_data = self._get_contact_data()
+        if initial_data:
+            self._update_from_contact_data(initial_data)
 
+    async def async_added_to_hass(self):
+        """Register contact events when added to hass."""
+        await super().async_added_to_hass()
+        
+        # Only set up listeners if a MeshCore instance is available
+        if not self.coordinator.api.mesh_core:
+            return
+        
+        # Import here to avoid import errors
+        import importlib
+        meshcore_events = importlib.import_module('meshcore.events')
+        EventType = meshcore_events.EventType
+        
+        try:
+            # Subscribe to contacts update events
+            self._remove_contacts_listener = self.coordinator.api.mesh_core.subscribe(
+                EventType.CONTACTS, 
+                self._handle_contacts_event
+            )
+        except Exception as ex:
+            _LOGGER.error(f"Error setting up contacts event subscription: {ex}")
+    
+    async def async_will_remove_from_hass(self):
+        """Clean up subscriptions when entity is removed."""           
+        if self._remove_contacts_listener:
+            try:
+                self._remove_contacts_listener()
+                self._remove_contacts_listener = None
+            except Exception as ex:
+                _LOGGER.error(f"Error removing contacts listener: {ex}")
+        
+        await super().async_will_remove_from_hass()
+    
+    async def _handle_contacts_event(self, event):
+        """Handle contacts update events."""
+        if not event or not hasattr(event, "payload") or not event.payload:
+            return
+            
+        # Look for our contact in the contacts list
+        for contact in event.payload.values():
+            if not isinstance(contact, dict):
+                continue
+                
+            # Match by public key
+            if contact.get("public_key", "").startswith(self.public_key):
+                self._update_from_contact_data(contact)
+                self.async_write_ha_state()
+                break
+                
+            # Match by name (fallback)
+            if contact.get("adv_name") == self.contact_name:
+                self._update_from_contact_data(contact)
+                self.async_write_ha_state()
+                break
+
+    @property
+    def device_info(self):
+        return DeviceInfo(**self.coordinator.device_info)
+        
     def _get_contact_data(self) -> Dict[str, Any]:
         """Get the data for this contact from the coordinator."""
         if not self.coordinator.data or not isinstance(self.coordinator.data, dict):
@@ -400,77 +543,42 @@ class MeshCoreContactDiagnosticBinarySensor(CoordinatorEntity, BinarySensorEntit
                 return contact
                 
         return {}
-
-    def _update_attributes(self) -> Dict[str, Any]:
-        """Update the attributes and icon based on contact data."""
-        contact = self._get_contact_data()
+    
+    def _update_from_contact_data(self, contact: Dict[str, Any]):
+        """Update entity state based on contact data."""
         if not contact:
-            # If contact not found, use default icon
-            self._attr_icon = "mdi:radio-tower"
-            self._attr_name = self.contact_name
-            return {"status": "unknown"}
-            
-        # Create a copy of the contact data for attributes
-        attributes = {}
+            return
         
-        # Add all contact properties directly as attributes
-        for key, value in contact.items():
-            attributes[key] = value
-            
+        # Store the contact data
+        self._contact_data = dict(contact)
+        
         # Get the node type and set icon accordingly
         node_type = contact.get("type")
-        
-        # Set different icons and names based on node type and state
         is_fresh = self.is_on
         
+        # Set different icons and names based on node type and state
         if node_type == NodeType.CLIENT:  # Client
             self._attr_icon = "mdi:account" if is_fresh else "mdi:account-off"
             self._attr_name = f"{self.contact_name} (Client)"
-            icon_file = "client-green.svg" if is_fresh else "client.svg"
-            attributes["entity_picture"] = f"/api/meshcore/static/{icon_file}"
-            attributes["node_type_str"] = "Client"
-            
         elif node_type == NodeType.REPEATER:  # Repeater
             self._attr_icon = "mdi:radio-tower" if is_fresh else "mdi:radio-tower-off"
             self._attr_name = f"{self.contact_name} (Repeater)"
-            icon_file = "repeater-green.svg" if is_fresh else "repeater.svg"
-            attributes["entity_picture"] = f"/api/meshcore/static/{icon_file}"
-            attributes["node_type_str"] = "Repeater"
-            
         elif node_type == NodeType.ROOM_SERVER:  # Room Server
             self._attr_icon = "mdi:forum" if is_fresh else "mdi:forum-outline"
             self._attr_name = f"{self.contact_name} (Room Server)"
-            icon_file = "room_server-green.svg" if is_fresh else "room_server.svg"
-            attributes["entity_picture"] = f"/api/meshcore/static/{icon_file}"
-            attributes["node_type_str"] = "Room Server"
-            
         else:
             # Default icon if type is unknown
             self._attr_icon = "mdi:help-network"
             self._attr_name = f"{self.contact_name} (Unknown)"
-            attributes["node_type_str"] = "Unknown"
-        
-
-        
-        # Format last advertisement time if available
-        if "last_advert" in attributes and attributes["last_advert"] > 0:
-            last_advert_time = datetime.fromtimestamp(attributes["last_advert"])
-            attributes["last_advert_formatted"] = last_advert_time.isoformat()
-
-        return attributes
-    
-        """Return the icon for this contact."""
-        return self._attr_icon
 
     @property
     def is_on(self) -> bool:
         """Return True if the contact is fresh/active."""
-        contact = self._get_contact_data()
-        if not contact:
+        if not self._contact_data:
             return False
             
         # Check last advertisement time for contact status
-        last_advert = contact.get("last_advert", 0)
+        last_advert = self._contact_data.get("last_advert", 0)
         if last_advert > 0:
             # Calculate time since last advert
             time_since = time.time() - last_advert
@@ -487,8 +595,42 @@ class MeshCoreContactDiagnosticBinarySensor(CoordinatorEntity, BinarySensorEntit
         
     @property
     def extra_state_attributes(self) -> Dict[str, Any]:
-        """Return the raw contact data as attributes."""
-        return self._update_attributes()
+        """Return the contact data as attributes."""
+        if not self._contact_data:
+            return {"status": "unknown"}
+            
+        attributes = {}
+        
+        # Add all contact properties as attributes
+        for key, value in self._contact_data.items():
+            attributes[key] = value
+        
+        # Get node type string
+        node_type = self._contact_data.get("type")
+        if node_type == NodeType.CLIENT:
+            attributes["node_type_str"] = "Client"
+            icon_file = "client-green.svg" if self.is_on else "client.svg"
+        elif node_type == NodeType.REPEATER:
+            attributes["node_type_str"] = "Repeater"
+            icon_file = "repeater-green.svg" if self.is_on else "repeater.svg"
+        elif node_type == NodeType.ROOM_SERVER:
+            attributes["node_type_str"] = "Room Server"
+            icon_file = "room_server-green.svg" if self.is_on else "room_server.svg"
+        else:
+            attributes["node_type_str"] = "Unknown"
+            icon_file = None
+            
+        # Add entity picture if we have an icon
+        if icon_file:
+            attributes["entity_picture"] = f"/api/meshcore/static/{icon_file}"
+        
+        # Format last advertisement time if available
+        last_advert = self._contact_data.get("last_advert", 0)
+        if last_advert > 0:
+            last_advert_time = datetime.fromtimestamp(last_advert)
+            attributes["last_advert_formatted"] = last_advert_time.isoformat()
+            
+        return attributes
 
 
 class MeshCoreRepeaterBinarySensor(CoordinatorEntity, BinarySensorEntity):
