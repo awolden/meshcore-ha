@@ -24,7 +24,6 @@ from .const import (
     ATTR_ENTRY_ID,
     DEFAULT_DEVICE_NAME,
 )
-from .logbook import handle_log_message
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -128,7 +127,7 @@ async def async_setup_services(hass: HomeAssistant) -> None:
                             # Include the contact's public key - most critical for entity_id generation
                             "contact_public_key": pubkey
                         }
-                        handle_log_message(hass, outgoing_msg)
+                        # handle_log_message(hass, outgoing_msg)
                     else:
                         _LOGGER.warning(
                             "Failed to send message to node %s", node_id
@@ -183,7 +182,7 @@ async def async_setup_services(hass: HomeAssistant) -> None:
                             "timestamp": int(time.time()),
                             "outgoing": True,
                         }
-                        handle_log_message(hass, outgoing_msg)
+                        # handle_log_message(hass, outgoing_msg)
                     else:
                         _LOGGER.warning(
                             "Failed to send message to channel %s", channel_idx
