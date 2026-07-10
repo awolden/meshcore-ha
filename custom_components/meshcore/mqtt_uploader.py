@@ -74,7 +74,7 @@ class BrokerConfig:
     client_id_prefix: str
     topic_status: str
     topic_packets: str
-    ws_path: str = "/mqtt"
+    ws_path: str = "/"
 
     @property
     def name(self) -> str:
@@ -306,7 +306,7 @@ class MeshCoreMqttUploader:
                     iata,
                 ),
                 ws_path=str(
-                    broker_settings.get("ws_path", "/mqtt") or "/mqtt"
+                    broker_settings.get("ws_path", "/") or "/"
                   ).strip(),
             )
 
