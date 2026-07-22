@@ -275,8 +275,8 @@ class MeshCoreDataUpdateCoordinator(DataUpdateCoordinator):
 
         Pushes fresh state to the console sensor immediately when one is
         registered (CONF_CLI_CONSOLE_ENABLED). No-ops gracefully when the
-        console is disabled, so the cli_command service can call this
-        unconditionally.
+        console is disabled, so the execute_command record_to_console path can
+        call this unconditionally.
         """
         self.cli_console_history.append({
             "timestamp": int(time.time()),

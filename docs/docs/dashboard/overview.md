@@ -148,9 +148,10 @@ You can also call the services directly with a command, e.g. from an automation
 or script:
 
 ```yaml
-action: meshcore.cli_command
+action: meshcore.execute_command
 data:
   command: get_stats_radio
+  record_to_console: true
 ```
 
 ### Network Map

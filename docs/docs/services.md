@@ -91,6 +91,7 @@ Execute Meshcore SDK commands directly for advanced control.
 |-------|------|----------|-------------|
 | `command` | string | Yes | Command with parameters |
 | `entry_id` | string | No | Config entry ID for multiple devices |
+| `record_to_console` | boolean | No | Record the command/response to the CLI Console and fire `meshcore_cli_response` (default `false`) |
 
 **Common Commands:**
 
@@ -169,6 +170,7 @@ Execute commands from the UI text input helper.
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `entry_id` | string | No | Config entry ID for multiple devices |
+| `record_to_console` | boolean | No | Record the command/response to the CLI Console and fire `meshcore_cli_response` (default `false`) |
 
 This service reads from `text.meshcore_command` and clears it after execution.
 
@@ -179,54 +181,29 @@ service: meshcore.execute_command_ui
 data: {}
 ```
 
-### CLI Command
-Run a command against the local companion radio **and record the command and
-its response to the CLI Console sensor**, so the output is visible in the UI
-(unlike `execute_command_ui`, which discards the response). Same command syntax
-and capabilities as `execute_command`. Enable the CLI Console under **Global
-Settings → Enable CLI Console** to get the `sensor.*_cli_console` output entity.
-The console records only command/response pairs — it does not stream the
-radio's continuous diagnostic/noise-floor log.
+### CLI Console
+Pass `record_to_console: true` to `execute_command` (or `execute_command_ui`) to
+**record the command and its response to the CLI Console sensor**, so the output
+is visible in the UI (without the flag the response is only returned to the
+caller and, for `execute_command_ui`, discarded). Enable the CLI Console under
+**Global Settings → Enable CLI Console** to get the `sensor.*_cli_console`
+output entity. The console records only command/response pairs — it does not
+stream the radio's continuous diagnostic/noise-floor log.
 
 > See the [CLI Command Reference](./cli-commands) for the full list of commands
 > and their arguments.
 
-**Service:** `meshcore.cli_command`
-
-**Fields:**
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `command` | string | Yes | Command with parameters, e.g. `get_bat`, `get_stats_radio`, `set_tx_power 20` |
-| `entry_id` | string | No | Config entry ID for multiple devices |
-
 **Example:**
 
 ```yaml
-service: meshcore.cli_command
+service: meshcore.execute_command
 data:
   command: get_stats_radio
+  record_to_console: true
 ```
 
-### CLI Command UI
-Run the command in `text.meshcore_command` through the CLI Console (so the
-response is recorded to the transcript) and clear the input afterwards. This is
-the CLI-Console equivalent of `execute_command_ui`.
-
-**Service:** `meshcore.cli_command_ui`
-
-**Fields:**
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `entry_id` | string | No | Config entry ID for multiple devices |
-
-**Example:**
-
-```yaml
-service: meshcore.cli_command_ui
-data: {}
-```
+Use `meshcore.cli_console_clear` to empty the transcript (no `entry_id` clears
+every configured device's console).
 
 ## Usage in Automations
 

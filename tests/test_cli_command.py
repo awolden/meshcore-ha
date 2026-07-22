@@ -1,9 +1,12 @@
-"""Tests for the CLI console services (cli_command / cli_command_ui) in services.py.
+"""Tests for the CLI console recording folded into execute_command / _ui.
 
-The CLI console services wrap execute_command and additionally:
+execute_command and execute_command_ui accept a ``record_to_console`` flag.
+When set, they additionally:
   * record the command/response pair to the resolved coordinator's console
   * fire the EVENT_CLI_RESPONSE event
-  * return the same response execute_command produces
+  * (unchanged) return the same response execute_command produces
+
+Without the flag they behave as plain command runners and do neither.
 
 These tests reuse the module-loading approach from test_execute_command.py:
 conftest stubs meshcore/const/homeassistant, so services.py is loaded directly
@@ -41,14 +44,15 @@ _module = importlib.util.module_from_spec(_spec)
 _module.__package__ = "custom_components.meshcore"
 _spec.loader.exec_module(_module)
 
-# create_service_call (used by cli_command_ui) branches on MAJOR_VERSION, which
-# conftest leaves as a MagicMock; pin it so the comparison works under test.
+# create_service_call (used by execute_command_ui) branches on MAJOR_VERSION,
+# which conftest leaves as a MagicMock; pin it so the comparison works.
 _module.MAJOR_VERSION = 2025
 
 async_setup_services = _module.async_setup_services
 DOMAIN = _module.DOMAIN
 ATTR_COMMAND = _module.ATTR_COMMAND
 ATTR_ENTRY_ID = _module.ATTR_ENTRY_ID
+ATTR_RECORD_TO_CONSOLE = _module.ATTR_RECORD_TO_CONSOLE
 EVENT_CLI_RESPONSE = _module.EVENT_CLI_RESPONSE
 
 
@@ -96,19 +100,23 @@ async def _setup(coordinator):
     return hass, registered
 
 
-def _call(command, entry_id=None):
+def _call(command, entry_id=None, record=True):
     call = MagicMock()
-    call.data = {ATTR_COMMAND: command, ATTR_ENTRY_ID: entry_id}
+    call.data = {
+        ATTR_COMMAND: command,
+        ATTR_ENTRY_ID: entry_id,
+        ATTR_RECORD_TO_CONSOLE: record,
+    }
     return call
 
 
 @pytest.mark.asyncio
-async def test_cli_command_records_and_returns_response():
-    """cli_command returns the execute_command response and records it."""
+async def test_record_flag_records_and_returns_response():
+    """record_to_console records the pair and still returns the response."""
     payload = {"level": 4100, "status": "ok"}
     coord = _build_coordinator("get_bat", _Event(_ET.MSG_SENT, payload))
     hass, registered = await _setup(coord)
-    handler = registered["async_cli_command_service"][0]
+    handler = registered["async_execute_command_service"][0]
 
     result = await handler(_call("get_bat"))
 
@@ -121,12 +129,12 @@ async def test_cli_command_records_and_returns_response():
 
 
 @pytest.mark.asyncio
-async def test_cli_command_fires_event():
-    """cli_command fires EVENT_CLI_RESPONSE with the command and response."""
+async def test_record_flag_fires_event():
+    """record_to_console fires EVENT_CLI_RESPONSE with the command and response."""
     payload = {"ok": True}
     coord = _build_coordinator("get_time", _Event(_ET.MSG_SENT, payload))
     hass, registered = await _setup(coord)
-    handler = registered["async_cli_command_service"][0]
+    handler = registered["async_execute_command_service"][0]
 
     await handler(_call("get_time"))
 
@@ -139,12 +147,27 @@ async def test_cli_command_fires_event():
 
 
 @pytest.mark.asyncio
-async def test_cli_command_marks_error_on_no_response():
+async def test_no_flag_does_not_record_or_fire():
+    """Without record_to_console, execute_command records nothing and is silent."""
+    payload = {"ok": True}
+    coord = _build_coordinator("get_time", _Event(_ET.MSG_SENT, payload))
+    hass, registered = await _setup(coord)
+    handler = registered["async_execute_command_service"][0]
+
+    result = await handler(_call("get_time", record=False))
+
+    assert result == payload
+    coord.record_cli_console.assert_not_called()
+    hass.bus.async_fire.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_record_flag_marks_error_on_no_response():
     """A None response (e.g. unknown/failed command) records is_error=True."""
     # An unknown command makes execute_command return None without running.
     coord = _build_coordinator("get_bat", _Event(_ET.MSG_SENT, {"x": 1}))
     hass, registered = await _setup(coord)
-    handler = registered["async_cli_command_service"][0]
+    handler = registered["async_execute_command_service"][0]
 
     result = await handler(_call("definitely_not_a_command"))
 
@@ -155,12 +178,12 @@ async def test_cli_command_marks_error_on_no_response():
 
 
 @pytest.mark.asyncio
-async def test_cli_command_ui_reads_text_helper():
-    """cli_command_ui pulls the command from text.meshcore_command and runs it."""
+async def test_command_ui_records_when_flag_set():
+    """execute_command_ui pulls the command from the helper and records it."""
     payload = {"done": True}
     coord = _build_coordinator("send_advert", _Event(_ET.MSG_SENT, payload))
     hass, registered = await _setup(coord)
-    handler = registered["async_cli_command_ui_service"][0]
+    handler = registered["async_execute_command_ui_service"][0]
 
     state = MagicMock()
     state.state = "send_advert"
@@ -169,16 +192,14 @@ async def test_cli_command_ui_reads_text_helper():
 
     # create_service_call wraps homeassistant.core.ServiceCall, which conftest
     # mocks (its .data is not the dict we pass). Stub it to a plain call object
-    # so the delegated cli_command sees the real command string.
+    # so the delegated execute_command sees the real command string and flag.
     def _fake_call(domain, service, data=None, hass=None):
-        # The UI handler builds data with literal "command"/"entry_id" keys;
-        # the cli_command handler reads the (mocked) ATTR_* constants. Remap so
-        # the delegated handler finds the command string.
         data = data or {}
         c = MagicMock()
         c.data = {
             ATTR_COMMAND: data.get("command"),
             ATTR_ENTRY_ID: data.get("entry_id"),
+            ATTR_RECORD_TO_CONSOLE: data.get("record_to_console"),
         }
         return c
 
@@ -186,7 +207,7 @@ async def test_cli_command_ui_reads_text_helper():
     _module.create_service_call = _fake_call
     try:
         ui_call = MagicMock()
-        ui_call.data = {ATTR_ENTRY_ID: None}
+        ui_call.data = {ATTR_ENTRY_ID: None, ATTR_RECORD_TO_CONSOLE: True}
         result = await handler(ui_call)
     finally:
         _module.create_service_call = monkeypatched
@@ -198,17 +219,19 @@ async def test_cli_command_ui_reads_text_helper():
 
 
 @pytest.mark.asyncio
-async def test_cli_command_ui_noop_on_empty_input():
-    """cli_command_ui does nothing when the text helper is empty."""
+async def test_command_ui_noop_on_empty_input():
+    """execute_command_ui does nothing when the text helper is empty."""
     coord = _build_coordinator("get_bat", _Event(_ET.MSG_SENT, {"x": 1}))
     hass, registered = await _setup(coord)
-    handler = registered["async_cli_command_ui_service"][0]
+    handler = registered["async_execute_command_ui_service"][0]
 
     state = MagicMock()
     state.state = ""
     hass.states.get = MagicMock(return_value=state)
 
-    result = await handler(MagicMock(data={ATTR_ENTRY_ID: None}))
+    result = await handler(
+        MagicMock(data={ATTR_ENTRY_ID: None, ATTR_RECORD_TO_CONSOLE: True})
+    )
 
     assert result is None
     coord.record_cli_console.assert_not_called()

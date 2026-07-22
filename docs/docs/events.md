@@ -335,8 +335,9 @@ action:
 ## CLI Console Events
 
 ### meshcore_cli_response
-Fired after a `meshcore.cli_command` (or `cli_command_ui`) call completes. Use
-it to react to CLI output in automations without polling the console sensor.
+Fired after an `execute_command` (or `execute_command_ui`) call made with
+`record_to_console: true` completes. Use it to react to CLI output in
+automations without polling the console sensor.
 
 **Event data:**
 

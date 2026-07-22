@@ -5,9 +5,8 @@ title: CLI Command Reference
 
 # CLI Command Reference
 
-The `meshcore.cli_command` and `meshcore.execute_command` services (and the CLI
-Console card) run commands against your **local companion radio**. This page
-lists what you can type.
+The `meshcore.execute_command` service (and the CLI Console card) runs commands
+against your **local companion radio**. This page lists what you can type.
 
 ## Which "CLI" is this?
 
@@ -15,7 +14,7 @@ MeshCore has several command vocabularies — they are **not** interchangeable:
 
 | Vocabulary | Where | Example |
 |---|---|---|
-| **This CLI** (meshcore-py SDK methods) | HA `cli_command` / `execute_command` / CLI Console | `send_device_query`, `get_bat` |
+| **This CLI** (meshcore-py SDK methods) | HA `execute_command` / CLI Console | `send_device_query`, `get_bat` |
 | Companion app (iOS/Android) | The phone GUI | buttons/screens (same protocol underneath) |
 | `meshcli` (meshcore-cli) | A separate terminal tool | `infos`, `advert`, `send` |
 | Repeater / room-server CLI | Sent to a **remote** repeater after `send_login` | `reboot`, `set freq …` |
@@ -34,8 +33,9 @@ modules — every `async def <name>(...)` is a command.
   name — used for commands that talk to a *remote* node.
 - Functional form also works: `send_advert(flood=True)`.
 
-Responses appear in the CLI Console transcript, in the Developer Tools → Actions
-result, and (for `cli_command`) on the `meshcore_cli_response` event.
+Responses appear in the Developer Tools → Actions result, and — when the command
+is run with `record_to_console: true` — in the CLI Console transcript and on the
+`meshcore_cli_response` event.
 
 :::warning
 Commands prefixed `set_*`, `import_*`, `reboot`, and `send_advert` **change your

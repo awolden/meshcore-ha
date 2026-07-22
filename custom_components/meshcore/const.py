@@ -31,8 +31,6 @@ SERVICE_SEND_MESSAGE: Final = "send_message"
 SERVICE_SEND_CHANNEL_MESSAGE: Final = "send_channel_message"
 SERVICE_EXECUTE_COMMAND: Final = "execute_command"
 SERVICE_EXECUTE_COMMAND_UI: Final = "execute_command_ui"
-SERVICE_CLI_COMMAND: Final = "cli_command"
-SERVICE_CLI_COMMAND_UI: Final = "cli_command_ui"
 SERVICE_CLI_CLEAR: Final = "cli_console_clear"
 SERVICE_MESSAGE_SCRIPT: Final = "send_ui_message"
 SERVICE_ADD_SELECTED_CONTACT: Final = "add_selected_contact"
@@ -56,6 +54,9 @@ ATTR_MESSAGE: Final = "message"
 ATTR_COMMAND: Final = "command"
 ATTR_ENTRY_ID: Final = "entry_id"
 ATTR_SCOPE: Final = "scope"
+# When set on execute_command / execute_command_ui, the command/response pair is
+# recorded to the CLI Console transcript and the meshcore_cli_response event fires.
+ATTR_RECORD_TO_CONSOLE: Final = "record_to_console"
 
 # Platform constants
 PLATFORM_MESSAGE: Final = "message"
@@ -132,9 +133,9 @@ CONF_SELF_DIAGNOSTICS_INTERVAL: Final = "self_diagnostics_interval"
 DEFAULT_SELF_DIAGNOSTICS_INTERVAL: Final = 300  # 5 minutes in seconds
 
 # CLI console settings. An interactive command surface for the local companion
-# radio: commands run through the same execute_command path, but the command
-# and its response are recorded into a sensor transcript so output is visible
-# in the UI (unlike execute_command_ui, which discards the response). It does
+# radio: execute_command / execute_command_ui called with record_to_console: true
+# record the command and its response into a sensor transcript so output is
+# visible in the UI (a plain execute_command_ui discards the response). It does
 # NOT stream LOG_DATA / RX_LOG packet noise — only command/response pairs.
 CONF_CLI_CONSOLE_ENABLED: Final = "cli_console_enabled"
 # Number of command/response pairs kept in the rolling console transcript.

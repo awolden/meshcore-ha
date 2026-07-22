@@ -519,8 +519,8 @@ async def async_setup_entry(
     entities.append(MeshCoreCompanionPrefixSensor(coordinator))
 
     # Add the CLI console transcript sensor only when opted in (default off).
-    # The cli_command service records command/response pairs into this entity
-    # so the output is visible in the UI without a custom card.
+    # execute_command / execute_command_ui with record_to_console record
+    # command/response pairs into this entity so the output is visible in the UI.
     if entry.data.get(CONF_CLI_CONSOLE_ENABLED, False):
         entities.append(MeshCoreCLIConsoleSensor(coordinator))
 
@@ -1361,18 +1361,29 @@ def _format_cli_response(response: Any) -> str:
 class MeshCoreCLIConsoleSensor(CoordinatorEntity, SensorEntity):
     """Interactive CLI console transcript for the local companion radio.
 
-    Records command/response pairs produced by the ``meshcore.cli_command``
-    service so output is visible in the UI — unlike ``execute_command_ui``,
-    which runs a command but discards its response. Created only when
-    CONF_CLI_CONSOLE_ENABLED is set (default off).
+    Records command/response pairs produced by ``execute_command`` /
+    ``execute_command_ui`` called with ``record_to_console: true`` so output is
+    visible in the UI — a plain ``execute_command_ui`` runs a command but
+    discards its response. Created only when CONF_CLI_CONSOLE_ENABLED is set
+    (default off).
 
-    State is the most recent command (so the entity badge shows activity at a
-    glance). The full rolling transcript lives in attributes: ``history`` is a
-    structured list of {timestamp, command, response, is_error}, and
-    ``transcript`` is a pre-rendered markdown string for a markdown card. The
-    transcript intentionally contains only command/response pairs — it never
-    streams LOG_DATA / RX_LOG packet noise.
+    State is the command count (a neutral activity indicator). The state is
+    always written to the recorder DB, so it must NOT be the raw command string,
+    which can carry secrets (e.g. ``send_login <contact> <password>``). The full
+    rolling transcript lives in attributes: ``history`` is a structured list of
+    {timestamp, command, response, is_error}, and ``transcript`` is a
+    pre-rendered markdown string for a markdown card. The transcript
+    intentionally contains only command/response pairs — it never streams
+    LOG_DATA / RX_LOG packet noise.
     """
+
+    # Keep the transcript out of the recorder DB: these attributes hold the full
+    # rolling transcript (tens of KB per command) and the raw command/response,
+    # which can contain secrets. Recording them would bloat history and leak
+    # credentials. The state itself (command_count) stays a neutral counter.
+    _unrecorded_attributes = frozenset(
+        {"history", "transcript", "last_response", "last_command"}
+    )
 
     # Not attached to the companion device and hidden by default: the console
     # only works as a dashboard card (a device page can't render the transcript),
@@ -1407,13 +1418,14 @@ class MeshCoreCLIConsoleSensor(CoordinatorEntity, SensorEntity):
         await super().async_will_remove_from_hass()
 
     @property
-    def native_value(self) -> str:
-        """Return the most recent command (truncated to the state length cap)."""
-        history = self.coordinator.cli_console_history
-        if not history:
-            return "ready"
-        # HA state values are capped at 255 chars; keep headroom.
-        return str(history[-1].get("command", ""))[:250] or "ready"
+    def native_value(self) -> int:
+        """Return the number of command/response pairs in the transcript.
+
+        A neutral counter, deliberately not the raw command string: the state is
+        always recorded to the DB and command text can contain secrets (e.g.
+        ``send_login <contact> <password>``).
+        """
+        return len(self.coordinator.cli_console_history)
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:

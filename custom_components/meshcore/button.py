@@ -18,7 +18,7 @@ from .const import (
     CONF_CLI_CONSOLE_ENABLED,
     DOMAIN,
     ENTITY_DOMAIN_BUTTON,
-    SERVICE_CLI_COMMAND_UI,
+    SERVICE_EXECUTE_COMMAND_UI,
 )
 from .utils import format_entity_id
 
@@ -76,8 +76,11 @@ class MeshCoreCLIRunButton(_MeshCoreCLIButton):
         """Execute the command in the input helper and record its output."""
         await self.hass.services.async_call(
             DOMAIN,
-            SERVICE_CLI_COMMAND_UI,
-            {"entry_id": self.coordinator.config_entry.entry_id},
+            SERVICE_EXECUTE_COMMAND_UI,
+            {
+                "entry_id": self.coordinator.config_entry.entry_id,
+                "record_to_console": True,
+            },
             blocking=True,
         )
 
